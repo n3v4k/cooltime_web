@@ -60,30 +60,11 @@ export default function HomePage() {
 
 function CoolTimeLogo() {
   return (
-    <svg
-      viewBox="0 0 150 100"
-      className="h-24 w-36 animate-slide-up drop-shadow-sm"
-      xmlns="http://www.w3.org/2000/svg"
-    >
-      <circle cx="75" cy="50" r="42" fill="#e0f2fe" stroke="#0ea5e9" strokeWidth="4" />
-      {[0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330].map((deg) => (
-        <line
-          key={deg}
-          x1={75 + 36 * Math.sin((deg * Math.PI) / 180)}
-          y1={50 - 36 * Math.cos((deg * Math.PI) / 180)}
-          x2={75 + 40 * Math.sin((deg * Math.PI) / 180)}
-          y2={50 - 40 * Math.cos((deg * Math.PI) / 180)}
-          stroke="#0284c7"
-          strokeWidth="2"
-          strokeLinecap="round"
-        />
-      ))}
-      {/* 시침: 온도계 모양, 코랄 */}
-      <line x1="75" y1="50" x2="58" y2="34" stroke="#ff6b4d" strokeWidth="5" strokeLinecap="round" />
-      <circle cx="58" cy="34" r="5" fill="#ff6b4d" />
-      {/* 분침: 파랑 */}
-      <line x1="75" y1="50" x2="98" y2="62" stroke="#0284c7" strokeWidth="4" strokeLinecap="round" />
-      <circle cx="75" cy="50" r="4.5" fill="#0f172a" />
-    </svg>
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src="/logo.svg"
+      alt="쿨타임 로고"
+      className="h-24 w-24 animate-slide-up drop-shadow-sm"
+    />
   );
 }
