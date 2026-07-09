@@ -101,7 +101,7 @@ export function getEffectiveRule(tier: Tier, policy: RestPolicy): TierRule {
   const base = TIER_RULES[tier];
   if (tier === "정상") return base;
 
-  const { workIntervalMin, restDurationMin } = REST_POLICIES[policy];
+  const { workIntervalMin, restDurationMin } = REST_POLICIES[policy] ?? REST_POLICIES["2h20m"];
   const workLabel = formatDurationMin(workIntervalMin);
   const restLabel = formatDurationMin(restDurationMin);
   const verb =
