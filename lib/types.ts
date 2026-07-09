@@ -3,7 +3,7 @@ export type Tier = "정상" | "주의" | "경고" | "위험" | "매우위험";
 export type RestStatus = "working" | "resting" | "overdue" | "off";
 
 // 관리자가 수동으로 선택하는 휴식 주기 정책
-export type RestPolicy = "2h20m" | "1h15m";
+export type RestPolicy = "2h20m" | "1h15m" | "1m1m";
 
 export type IllnessType = "열사병" | "열탈진" | "열경련" | "열실신" | "열부종" | null;
 
@@ -14,7 +14,8 @@ export type EventType =
   | "REST_END"
   | "OVERDUE"
   | "TIER_UP"
-  | "ILLNESS_REPORTED";
+  | "ILLNESS_REPORTED"
+  | "TEMP_RECORDED";
 
 export type TempSource = "auto" | "manual";
 

@@ -1,10 +1,33 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ILLNESS_GUIDE } from "@/lib/illness";
 
-export default function IllnessGuideList() {
+export interface IllnessFocusRequest {
+  type: string;
+  token: number;
+}
+
+export default function IllnessGuideList({
+  focus,
+}: {
+  focus?: IllnessFocusRequest | null;
+}) {
   const [openType, setOpenType] = useState<string | null>(null);
+  const itemRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  // 관리자가 온열질환 알림을 확인 처리하면 해당 유형의 대처법 위젯을 펼치고 스크롤로 보여준다
+  useEffect(() => {
+    if (!focus) return;
+    setOpenType(focus.type);
+    const el = itemRefs.current[focus.type];
+    if (el) {
+      requestAnimationFrame(() => {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.token]);
 
   return (
     <div className="space-y-2">
@@ -17,6 +40,9 @@ export default function IllnessGuideList() {
         return (
           <div
             key={g.type}
+            ref={(el) => {
+              itemRefs.current[g.type] = el;
+            }}
             className={`overflow-hidden rounded-2xl border shadow-sm transition-all ${
               emergency ? "border-red-200 bg-red-50" : "border-slate-200 bg-white"
             }`}

@@ -13,8 +13,8 @@ create table if not exists sites (
   humidity numeric,                          -- 상대습도(%): 자동 또는 관리자 수동 입력
   feels_like_temp numeric,                   -- temp·humidity로 계산한 체감온도 (getSummerWindChill)
   tier text,                                 -- 정상|주의|경고|위험|매우위험
-  temp_source text not null default 'auto',  -- 'auto' | 'manual'
-  rest_policy text not null default '2h20m', -- 관리자가 선택하는 휴식 주기: '2h20m' | '1h15m'
+  temp_source text not null default 'manual', -- 'auto' | 'manual'
+  rest_policy text not null default '2h20m', -- 관리자가 선택하는 휴식 주기: '2h20m' | '1h15m' | '1m1m'(데모)
   created_at timestamptz default now()
 );
 
@@ -38,7 +38,7 @@ create table if not exists logs (
   timestamp timestamptz default now(),
   site_temp numeric,
   tier text,
-  event_type text, -- 'WORK_START'|'WORK_END'|'REST_START'|'REST_END'|'OVERDUE'|'TIER_UP'|'ILLNESS_REPORTED'
+  event_type text, -- 'WORK_START'|'WORK_END'|'REST_START'|'REST_END'|'OVERDUE'|'TIER_UP'|'ILLNESS_REPORTED'|'TEMP_RECORDED'
   note text
 );
 

@@ -3,12 +3,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { LogEntry, Site, TempSource, Tier, Worker } from "@/lib/types";
-import { getEffectiveRule, getTier, REST_POLICIES, TIER_RULES } from "@/lib/tier";
+import { getEffectiveRule, getTier, isRestNeeded, REST_POLICIES, TIER_RULES } from "@/lib/tier";
 import { getSummerWindChill } from "@/lib/heatIndex";
 import { downloadCsv, logsToCsv } from "@/lib/csv";
 import { formatElapsed } from "@/lib/time";
+import { requestNotificationPermission, notify } from "@/lib/notify";
 import TierBadge from "./TierBadge";
 import LegalAccordion from "./LegalAccordion";
+import IllnessGuideList, { IllnessFocusRequest } from "./IllnessGuideList";
+import InfoPopover from "./InfoPopover";
 import { AdminSite } from "./AdminSiteForm";
 
 const POLL_MS = 7000;
@@ -24,15 +27,38 @@ export default function AdminDashboard({
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [newName, setNewName] = useState("");
-  const [tempSource, setTempSource] = useState<TempSource>("auto");
+  const [tempSource, setTempSource] = useState<TempSource>("manual");
   const [temp, setTemp] = useState(31);
   const [humidity, setHumidity] = useState(60);
   const [autoNotice, setAutoNotice] = useState<string | null>(null);
   const [locationName, setLocationName] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
-  const [dismissedLogIds, setDismissedLogIds] = useState<Set<string>>(new Set());
+  const dismissedLogsKey = `cooltime_admin_dismissed_logs_${site.siteId}`;
+  const [dismissedLogIds, setDismissedLogIds] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set();
+    try {
+      const raw = localStorage.getItem(dismissedLogsKey);
+      return raw ? new Set(JSON.parse(raw)) : new Set();
+    } catch {
+      return new Set();
+    }
+  });
   const [dismissedOverdueIds, setDismissedOverdueIds] = useState<Set<string>>(new Set());
+  const [illnessFocus, setIllnessFocus] = useState<IllnessFocusRequest | null>(null);
   const initializedWeatherRef = useRef(false);
+  const initializedIllnessRef = useRef(false);
+  const notifiedIllnessIdsRef = useRef<Set<string>>(new Set());
+  const illnessFocusTokenRef = useRef(0);
+
+  function focusIllnessGuide(type: string | null) {
+    if (!type) return;
+    illnessFocusTokenRef.current += 1;
+    setIllnessFocus({ type, token: illnessFocusTokenRef.current });
+  }
+
+  useEffect(() => {
+    requestNotificationPermission();
+  }, []);
 
   const fetchSite = useCallback(async () => {
     const { data } = await supabase.from("sites").select("*").eq("id", site.siteId).maybeSingle();
@@ -57,7 +83,29 @@ export default function AdminDashboard({
       .eq("site_id", site.siteId)
       .gte("timestamp", startOfDay.toISOString())
       .order("timestamp", { ascending: false });
-    if (data) setLogs(data as LogEntry[]);
+    if (!data) return;
+    setLogs(data as LogEntry[]);
+
+    // 자가진단 위험 신고를 웹 알림으로 전송 (최초 로드 시 기존 기록은 알림 없이 기준선으로만 등록)
+    const illnessLogs = (data as LogEntry[]).filter((l) => l.event_type === "ILLNESS_REPORTED");
+    if (!initializedIllnessRef.current) {
+      illnessLogs.forEach((l) => notifiedIllnessIdsRef.current.add(l.id));
+      initializedIllnessRef.current = true;
+      return;
+    }
+    illnessLogs.forEach((l) => {
+      if (notifiedIllnessIdsRef.current.has(l.id)) return;
+      notifiedIllnessIdsRef.current.add(l.id);
+      if (l.note === "열사병") {
+        notify("긴급: 열사병 의심 신고", {
+          body: `${l.worker_name} 님 - 즉시 확인하고 119 신고 여부를 확인하세요.`,
+        });
+      } else {
+        notify("온열질환 의심 신고", {
+          body: `${l.worker_name} 님 - ${l.note ?? "증상"} 의심 · 확인이 필요합니다.`,
+        });
+      }
+    });
   }, [site.siteId]);
 
   useEffect(() => {
@@ -77,6 +125,8 @@ export default function AdminDashboard({
   }, [fetchSite, fetchWorkers, fetchLogs]);
 
   // 기온·습도로 체감온도를 계산해 저장한다 (휴식 타이머는 이 체감온도 기준으로 동작)
+  // 산업안전보건기준에 관한 규칙상 체감온도·조치사항은 기록해 당해연도 말까지 보관해야 하므로,
+  // 측정할 때마다 logs에도 기록을 남긴다.
   const applyReading = useCallback(
     async (t: number, rh: number, source: TempSource) => {
       const feelsLike = getSummerWindChill(t, rh);
@@ -85,6 +135,14 @@ export default function AdminDashboard({
         .from("sites")
         .update({ temp: t, humidity: rh, feels_like_temp: feelsLike, tier: nextTier, temp_source: source })
         .eq("id", site.siteId);
+      await supabase.from("logs").insert({
+        site_id: site.siteId,
+        worker_name: `현장_${site.name}`,
+        site_temp: feelsLike,
+        tier: nextTier,
+        event_type: "TEMP_RECORDED",
+        note: `기온 ${t}℃ · 습도 ${rh}% (${source === "auto" ? "자동" : "수동"}) · ${TIER_RULES[nextTier].description}`,
+      });
       fetchSite();
     },
     [site.siteId, fetchSite]
@@ -408,9 +466,20 @@ export default function AdminDashboard({
   const overdueWorkers = workers.filter(
     (w) => w.rest_status === "overdue" && !dismissedOverdueIds.has(w.id)
   );
+  const restNeededWorkers = workers.filter((w) =>
+    isRestNeeded(w.rest_status, w.tier_entered_at, rule.workIntervalMin, now)
+  );
 
   function dismissLog(id: string) {
-    setDismissedLogIds((prev) => new Set(prev).add(id));
+    setDismissedLogIds((prev) => {
+      const next = new Set(prev).add(id);
+      try {
+        localStorage.setItem(dismissedLogsKey, JSON.stringify([...next]));
+      } catch {
+        // 저장 실패는 무시 (기능에는 영향 없음)
+      }
+      return next;
+    });
   }
 
   function dismissOverdue(id: string) {
@@ -445,11 +514,14 @@ export default function AdminDashboard({
               119 안내
             </a>
             <button
-              onClick={() => dismissLog(log.id)}
+              onClick={() => {
+                dismissLog(log.id);
+                focusIllnessGuide(log.note);
+              }}
               aria-label="알림 확인 완료"
               className="rounded-full bg-red-700/60 px-2.5 py-2 text-xs font-black text-white transition-all hover:scale-105 hover:bg-red-700"
             >
-              ✕
+              ✓
             </button>
           </div>
         </div>
@@ -465,11 +537,14 @@ export default function AdminDashboard({
             ⚠️ {log.worker_name} 님 {log.note} 의심 신고 · 상태를 확인하세요
           </p>
           <button
-            onClick={() => dismissLog(log.id)}
+            onClick={() => {
+              dismissLog(log.id);
+              focusIllnessGuide(log.note);
+            }}
             aria-label="알림 확인 완료"
             className="shrink-0 rounded-full bg-orange-200 px-2.5 py-1.5 text-xs font-black text-orange-700 transition-all hover:scale-105 hover:bg-orange-300"
           >
-            ✕
+            ✓
           </button>
         </div>
       ))}
@@ -478,13 +553,28 @@ export default function AdminDashboard({
       {overdueWorkers.length > 0 && (
         <div className="animate-slide-up flex items-center justify-between gap-2 rounded-2xl bg-red-50 p-4 text-sm font-bold text-red-600 shadow-md ring-1 ring-red-200">
           <p>⏰ 휴식 초과: {overdueWorkers.map((w) => w.name).join(", ")}</p>
-          <button
-            onClick={() => overdueWorkers.forEach((w) => dismissOverdue(w.id))}
-            aria-label="알림 확인 완료"
-            className="shrink-0 rounded-full bg-red-100 px-2.5 py-1.5 text-xs font-black text-red-600 transition-all hover:scale-105 hover:bg-red-200"
-          >
-            ✕
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              onClick={() => overdueWorkers.forEach((w) => handleWorkResumeFor(w))}
+              className="rounded-full bg-red-600 px-3 py-1.5 text-xs font-black text-white transition-all hover:scale-105 hover:bg-red-700 active:scale-95"
+            >
+              작업 복귀
+            </button>
+            <button
+              onClick={() => overdueWorkers.forEach((w) => dismissOverdue(w.id))}
+              aria-label="알림 확인 완료"
+              className="rounded-full bg-red-100 px-2.5 py-1.5 text-xs font-black text-red-600 transition-all hover:scale-105 hover:bg-red-200"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 휴식 필요 배너: 아직 초과는 아니지만 작업 주기를 넘겨 휴식이 필요한 작업자 */}
+      {restNeededWorkers.length > 0 && (
+        <div className="animate-pulse-ring flex items-center gap-2 rounded-2xl bg-orange-500 p-4 text-sm font-black text-white shadow-md">
+          <p>휴식 필요: {restNeededWorkers.map((w) => w.name).join(", ")}</p>
         </div>
       )}
 
@@ -493,14 +583,6 @@ export default function AdminDashboard({
         <div className="mb-4 flex justify-center">
           <div className="flex overflow-hidden rounded-full border border-slate-200">
             <button
-              onClick={handleSelectAuto}
-              className={`px-4 py-2 text-xs font-bold transition-all ${
-                tempSource === "auto" ? "bg-sky-500 text-white" : "text-slate-400"
-              }`}
-            >
-              자동 (날씨 API)
-            </button>
-            <button
               onClick={handleSelectManual}
               className={`px-4 py-2 text-xs font-bold transition-all ${
                 tempSource === "manual" ? "bg-sky-500 text-white" : "text-slate-400"
@@ -508,12 +590,38 @@ export default function AdminDashboard({
             >
               수동 입력
             </button>
+            <button
+              onClick={handleSelectAuto}
+              className={`px-4 py-2 text-xs font-bold transition-all ${
+                tempSource === "auto" ? "bg-sky-500 text-white" : "text-slate-400"
+              }`}
+            >
+              자동 (날씨 API)
+            </button>
           </div>
         </div>
 
-        <p className="mb-1 text-xs font-semibold text-slate-400">
-          현장 공통 체감온도 {locationName && tempSource === "auto" ? `· ${locationName}` : ""}
-        </p>
+        <div className="mb-1 flex items-center justify-center gap-1.5 text-xs font-semibold text-slate-400">
+          <span>
+            현장 공통 체감온도 {locationName && tempSource === "auto" ? `· ${locationName}` : ""}
+          </span>
+          <InfoPopover
+            text={
+              <>
+                <p className="mb-2 font-bold text-slate-700">온도계 설치 및 기록 보관 의무</p>
+                <ul className="list-disc space-y-1.5 pl-4">
+                  <li>폭염작업이 예상되면 근로자의 주된 작업 장소에 온도계를 상시 비치해야 합니다.</li>
+                  <li>체감온도와 조치사항을 기록해 해당 연도 12월 31일까지 보관해야 합니다.</li>
+                  <li>
+                    창고처럼 넓은 공간은 온도 편차가 커 온습도계 하나로는 부족하므로, 인력이
+                    많이 배치되는 장소 인근에 설치하는 것이 권장됩니다.
+                  </li>
+                  <li>바닥에서 약 1.2~1.5m 높이에 설치하는 것이 실제 작업환경을 잘 반영합니다.</li>
+                </ul>
+              </>
+            }
+          />
+        </div>
         <p className="mb-1 text-6xl font-black tracking-tighter text-slate-800">
           {siteRow?.feels_like_temp != null ? `${siteRow.feels_like_temp.toFixed(1)}°` : "-"}
         </p>
@@ -706,6 +814,7 @@ export default function AdminDashboard({
       </button>
 
       <LegalAccordion />
+      <IllnessGuideList focus={illnessFocus} />
 
       <button
         onClick={handleExit}
@@ -762,8 +871,12 @@ function WorkerRow({
     remainingLabel = `마지막 휴식으로부터 ${formatElapsed(elapsed)}`;
   }
 
+  const restNeeded = isRestNeeded(worker.rest_status, worker.tier_entered_at, rule.workIntervalMin, now);
+
   const statusLabel =
-    worker.rest_status === "working"
+    restNeeded
+      ? "휴식 필요"
+      : worker.rest_status === "working"
       ? "작업 중"
       : worker.rest_status === "resting"
       ? "휴식 중"
@@ -771,19 +884,24 @@ function WorkerRow({
       ? "휴식 초과"
       : "작업 종료";
 
-  const statusColor =
-    worker.rest_status === "working"
-      ? "bg-slate-100 text-slate-600"
-      : worker.rest_status === "resting"
-      ? "bg-sky-100 text-sky-600"
-      : worker.rest_status === "overdue"
-      ? "bg-red-100 text-red-600"
-      : "bg-slate-100 text-slate-400";
+  const statusColor = restNeeded
+    ? "bg-orange-500 text-white"
+    : worker.rest_status === "working"
+    ? "bg-slate-100 text-slate-600"
+    : worker.rest_status === "resting"
+    ? "bg-sky-100 text-sky-600"
+    : worker.rest_status === "overdue"
+    ? "bg-red-100 text-red-600"
+    : "bg-slate-100 text-slate-400";
 
   return (
     <div
       className={`animate-slide-up flex items-center justify-between rounded-2xl bg-white p-4 shadow-md transition-all ${
-        worker.rest_status === "overdue" ? "ring-2 ring-red-400" : ""
+        worker.rest_status === "overdue"
+          ? "ring-2 ring-red-400"
+          : restNeeded
+          ? "bg-orange-50 ring-2 ring-orange-400"
+          : ""
       }`}
     >
       <div className="flex items-center gap-3">
@@ -791,16 +909,18 @@ function WorkerRow({
           {worker.name.slice(0, 1)}
         </div>
         <div>
-          <p className="text-sm font-bold text-slate-700">{worker.name}</p>
+          <div className="flex items-center gap-1.5">
+            <p className="text-sm font-bold text-slate-700">{worker.name}</p>
+            <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${statusColor}`}>
+              {statusLabel}
+            </span>
+          </div>
           <p className="text-xs text-slate-400">
             {worker.is_outdoor ? "옥외" : "실내"} · {remainingLabel}
           </p>
         </div>
       </div>
       <div className="flex items-center gap-2">
-        <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${statusColor}`}>
-          {statusLabel}
-        </span>
         {worker.rest_status === "working" && (
           <>
             <button

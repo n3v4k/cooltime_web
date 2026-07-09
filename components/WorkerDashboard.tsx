@@ -3,7 +3,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { Site, Tier, Worker } from "@/lib/types";
-import { getEffectiveRule, getTier, isOutdoorRestrictedNow, isTierUp, TIER_RULES } from "@/lib/tier";
+import {
+  formatDurationMin,
+  getEffectiveRule,
+  getTier,
+  isOutdoorRestrictedNow,
+  isRestNeeded,
+  isTierUp,
+  TIER_RULES,
+} from "@/lib/tier";
 import TierBadge from "./TierBadge";
 import CountdownRing from "./CountdownRing";
 import LegalAccordion from "./LegalAccordion";
@@ -11,6 +19,7 @@ import IllnessGuideList from "./IllnessGuideList";
 import SelfDiagnosisModal from "./SelfDiagnosisModal";
 import { JoinedWorker } from "./WorkerJoinForm";
 import { IllnessType } from "@/lib/types";
+import { requestNotificationPermission, notify } from "@/lib/notify";
 
 const POLL_MS = 7000;
 
@@ -28,6 +37,11 @@ export default function WorkerDashboard({
   const [now, setNow] = useState(() => Date.now());
   const [showDiagnosis, setShowDiagnosis] = useState(false);
   const prevTierRef = useRef<Tier | null>(null);
+  const restNeededNotifiedRef = useRef(false);
+
+  useEffect(() => {
+    requestNotificationPermission();
+  }, []);
 
   const fetchSite = useCallback(async () => {
     const { data } = await supabase
@@ -209,6 +223,31 @@ export default function WorkerDashboard({
         event_type: "OVERDUE",
         note: null,
       });
+      notify("휴식 시간 초과", {
+        body: "설정된 휴식 시간이 지났습니다. 작업 복귀 전 확인해주세요.",
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [now]);
+
+  // 작업 중 휴식이 필요해지는 시점 자동 감지 (알림 1회 발송)
+  useEffect(() => {
+    restNeededNotifiedRef.current = false;
+  }, [worker?.tier_entered_at, worker?.rest_status]);
+
+  useEffect(() => {
+    if (!worker || restNeededNotifiedRef.current) return;
+    const needed = isRestNeeded(
+      worker.rest_status,
+      worker.tier_entered_at,
+      rule.workIntervalMin,
+      now
+    );
+    if (needed) {
+      restNeededNotifiedRef.current = true;
+      notify("휴식이 필요해요", {
+        body: `${tier} 단계: ${formatDurationMin(rule.restDurationMin ?? 0)} 휴식이 필요합니다.`,
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [now]);
@@ -240,6 +279,7 @@ export default function WorkerDashboard({
   }
 
   const outdoorRestricted = isOutdoorRestrictedNow(tier, worker.is_outdoor);
+  const restNeeded = isRestNeeded(worker.rest_status, worker.tier_entered_at, rule.workIntervalMin, now);
 
   let workElapsed = 0;
   let restElapsed = 0;
@@ -275,22 +315,25 @@ export default function WorkerDashboard({
       </div>
 
       {/* 행동 카드 */}
-      <div className={`animate-slide-up rounded-2xl p-5 shadow-xl ${rule.bg}`}>
+      <div
+        className={`animate-slide-up rounded-2xl p-5 shadow-xl transition-colors ${
+          restNeeded ? "bg-orange-50 ring-2 ring-orange-400" : rule.bg
+        }`}
+      >
+        {restNeeded && (
+          <p className="animate-pulse-ring mb-3 rounded-xl bg-orange-500 px-4 py-3 text-center text-sm font-black text-white">
+            지금 휴식이 필요해요!
+          </p>
+        )}
         {/* 필요 조치는 관리자가 수동 설정한 휴식 정책과 무관하게, 실제 법적 의무/권고 기준을 그대로 보여준다 */}
         <p className={`mb-2 text-sm font-medium leading-relaxed ${rule.color}`}>
           {TIER_RULES[tier].description}
         </p>
         {rule.restDurationMin && (
           <p className="mb-4 inline-block rounded-full bg-white/70 px-3 py-1 text-xs font-bold text-slate-500">
-            ⏱ 설정된 휴식 시간: {rule.restDurationMin}분
+            ⏱ 설정된 휴식 시간: {formatDurationMin(rule.restDurationMin)}
           </p>
         )}
-        {rule.outdoorNote && worker.is_outdoor && (
-          <p className="mb-4 rounded-xl bg-white/60 px-3 py-2 text-xs font-semibold text-[#FF0000]">
-            ☀️ {rule.outdoorNote}
-          </p>
-        )}
-
         {/* 상태 표시 영역: 작업 중/휴식 중/휴식 초과/작업 종료 어떤 상태여도 높이가 같도록 고정 */}
         <div className="flex min-h-[84px] flex-col justify-center">
           {worker.rest_status === "working" && rule.workIntervalMin && (
@@ -298,7 +341,7 @@ export default function WorkerDashboard({
               totalSeconds={rule.workIntervalMin * 60}
               elapsedSeconds={workElapsed}
               label="마지막 휴식으로부터"
-              colorClass="bg-slate-700"
+              colorClass={restNeeded ? "bg-orange-500" : "bg-slate-700"}
             />
           )}
 
@@ -330,7 +373,9 @@ export default function WorkerDashboard({
               <button
                 onClick={handleRestStart}
                 disabled={!rule.restDurationMin}
-                className="flex-1 rounded-xl bg-slate-800 py-3.5 text-base font-bold text-white shadow-md transition-all hover:scale-105 hover:bg-slate-900 active:scale-95 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:hover:scale-100"
+                className={`flex-1 rounded-xl py-3.5 text-base font-bold text-white shadow-md transition-all hover:scale-105 active:scale-95 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:hover:scale-100 ${
+                  restNeeded ? "bg-orange-500 hover:bg-orange-600" : "bg-slate-800 hover:bg-slate-900"
+                }`}
               >
                 휴식 타이머 시작
               </button>
@@ -374,7 +419,11 @@ export default function WorkerDashboard({
         <div>
           <p className="text-sm font-semibold text-slate-700">작업 환경</p>
           <p className="text-xs text-slate-400">
-            {outdoorRestricted ? "지금은 옥외 작업 제한 시간대예요" : "오후 2~5시 특례가 반영돼요"}
+            {outdoorRestricted
+              ? "지금은 옥외 작업 제한 시간대예요"
+              : worker.is_outdoor && rule.outdoorNote
+              ? rule.outdoorNote
+              : " "}
           </p>
         </div>
         <div className="flex overflow-hidden rounded-full border border-slate-200">

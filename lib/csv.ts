@@ -8,6 +8,7 @@ const EVENT_LABEL: Record<string, string> = {
   OVERDUE: "휴식 초과",
   TIER_UP: "단계 상승",
   ILLNESS_REPORTED: "온열질환 의심 신고",
+  TEMP_RECORDED: "체감온도 기록",
 };
 
 export function logsToCsv(logs: LogEntry[]): string {

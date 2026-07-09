@@ -123,7 +123,7 @@ export default function AdminSiteForm({ onReady }: { onReady: (s: AdminSite) => 
 
       const { data, error: err } = await supabase
         .from("sites")
-        .insert({ join_code: joinCode, name: name.trim(), tier: "정상" })
+        .insert({ join_code: joinCode, name: name.trim(), tier: "정상", temp_source: "manual" })
         .select()
         .single();
       if (err) throw err;
